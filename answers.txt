@@ -59,6 +59,9 @@ If the counter is larger or equal to 10, we abort the download and try another p
 Solution: We check the filename before uploading.
 If t->filename contains '/', we abort the upload and disconnect from the peer.
 
+4. A popular tracker may return a response larger than TASKBUFSIZ.
+Solution: We simply enlarge TASKBUFSIZ from 4096 to 65536.
+
 # EXERCISE 3: Describe the attacks you implemented for "evil mode".  Why
 #    are they attacks?  (~3-10 sentences each)
 
