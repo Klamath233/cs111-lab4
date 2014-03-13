@@ -35,8 +35,10 @@ static int listen_port;
  * a bounded buffer that simplifies reading from and writing to peers.
  */
 
-#define TASKBUFSIZ	4096	// Size of task_t::buf
+#define TASKBUFSIZ	65536	// Size of task_t::buf
 #define FILENAMESIZ	256	// Size of task_t::filename
+#define MAX_FILE_SIZE 1073741824 // 1GB
+#define SLOW_THRESHOLD 1024
 
 typedef enum tasktype {		// Which type of connection is this?
 	TASK_TRACKER,		// => Tracker connection
@@ -462,6 +464,12 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 	size_t messagepos;
 	assert(tracker_task->type == TASK_TRACKER);
 
+	// FIXED: a long filename may overflow t->filename.
+	if (strlen(filename) >= FILENAMESIZ) {
+		fprintf(stderr, "%s\n", "* Filename too long, abort.");
+		return NULL;
+	}
+	// FIXED.
 	message("* Finding peers for '%s'\n", filename);
 
 	osp2p_writef(tracker_task->peer_fd, "WANT %s\n", filename);
@@ -555,7 +563,18 @@ static void task_download(task_t *t, task_t *tracker_task)
 
 	// Read the file into the task buffer from the peer,
 	// and write it from the task buffer onto disk.
+	int slow_count = 0;
 	while (1) {
+		// FIXED: attacker may transfer infinitely large files.
+		//        We solve this by setting a maximum transfer amount.
+		if (t->total_written > MAX_FILE_SIZE) {
+			fprintf(stderr, "%s\n", "* File too large, retry with another peer.");
+			goto try_again;
+		}
+		// FIXED.
+
+		// FIXED: peer may be too slow. If so, abort this task and try a new peer.
+		size_t last_size = t->total_written;
 		int ret = read_to_taskbuf(t->peer_fd, t);
 		if (ret == TBUF_ERROR) {
 			error("* Peer read error");
@@ -569,6 +588,15 @@ static void task_download(task_t *t, task_t *tracker_task)
 			error("* Disk write error");
 			goto try_again;
 		}
+		size_t transferred_size = t->total_written - last_size;
+		if (transferred_size < SLOW_THRESHOLD) {
+			slow_count++;
+			if (slow_count > 10) {
+				fprintf(stderr, "%s\n", "* Peer too slow.");
+				goto try_again;
+			}
+		}
+		// FIXED.
 	}
 
 	// Empty files are usually a symptom of some error.
@@ -577,6 +605,52 @@ static void task_download(task_t *t, task_t *tracker_task)
 			t->disk_filename, (unsigned long) t->total_written);
 		// Inform the tracker that we now have the file,
 		// and can serve it to others!  (But ignore tracker errors.)
+
+		// CALCULATE MD5
+		char c[MD5_TEXT_DIGEST_SIZE + 1];
+	    char *filename=t->disk_filename;
+	    int i;
+	    FILE *inFile = fopen(filename, "rb");
+	    md5_state_t mdContext;
+	    int bytes;
+	    unsigned char data[1024];
+
+	    if (inFile == NULL) {
+	        fprintf(stderr, "* %s can't be opened.\n", filename);
+	        goto try_again;
+	    }
+
+	    md5_init(&mdContext);
+	    while ((bytes = fread(data, 1, 1024, inFile)) != 0)
+	        md5_append(&mdContext, data, bytes);
+	    md5_finish_text(&mdContext, c, 1);
+	    printf("Checking MD5...\nLOCAL: ");
+	    for(i = 0; i < MD5_TEXT_DIGEST_SIZE; i++) printf("%c", c[i]);
+	    printf(" %s\n", filename);
+	    fclose(inFile);
+	    c[MD5_TEXT_DIGEST_SIZE] = 0;
+		// CALCULATE MD5
+
+		// FETCH MD5 FROM TRACKER
+		osp2p_writef(tracker_task->peer_fd, "MD5SUM %s\n",
+			     t->filename);
+		char *s1, *s2;
+		int messagepos = read_tracker_response(tracker_task);
+		s1 = tracker_task->buf;
+		s2 = memchr(s1, '\n', (tracker_task->buf + messagepos) - s1);
+		*s2 = 0;
+		printf("SERVER: %s %s\n", tracker_task->buf, filename);
+		// FETCH MD5 FROM TRACKER
+
+		// COMPARE MD5
+		if (strcmp(c, tracker_task->buf) == 0) {
+			printf("%s %s\n", "File Integrity Validated.", t->filename);
+		} else {
+			printf("%s %s\n", "File corrupted! Try another peer...", t->filename);
+			goto try_again;
+		}
+		// COMPARE MD5
+
 		if (strcmp(t->filename, t->disk_filename) == 0) {
 			osp2p_writef(tracker_task->peer_fd, "HAVE %s\n",
 				     t->filename);
@@ -650,9 +724,14 @@ static void task_upload(task_t *t)
 
 	// FIXED: filename may point to file outside our directory.
 	size_t filename_len = strlen(t->filename);
-	/* potential buffer overrun detection */
+	// FIXED: filename may longer than buffer size.
+	if (filename_len >= FILENAMESIZ) {
+		fprintf(stderr, "* Buffer overflow detected.\n");
+		exit(1);
+	}
+	// FIXED.
 	if (memchr(t->filename, (int)'/', filename_len) != NULL) {
-		error("* Illegal file access indicator '/' detected.");
+		fprintf(stderr, "* Illegal file access indicator '/' detected.\n");
 		goto exit;
 	}
 	// FIXED.
