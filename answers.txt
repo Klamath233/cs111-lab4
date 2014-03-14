@@ -25,34 +25,33 @@ Email: shubham.gandhi@gmail.com
 # EXERCISE 1: What method you used to make your peer download and upload
 #    files in parallel?  (~1-3 sentences)
 
-For exercise 1, we use fork() system call to implement parallelism.
-In detail, we wrap task_download() and task_upload() in the loops with fork() system call.
+For exercise 1, we use the fork() system call to implement parallelism.
+Specifically, we wrap task_download() and task_upload() in the loops with the fork() system call.
 
 # EXERCISE 2A: What conditions did you find and fix that would have
 #    triggered a buffer overrun bug?  (~1-3 sentences each)
 
-There are two entries of buffer overrun attack.
-The first one is the strcpy() call in start_download() function.
-It is vulnurable because it can cause t->filename to be overflowed by a very long filename.
-For this bug, we check the length of filename by calling strlen() on it first.
-If the length is longer than FILENAMESIZ, we simply skip the file.
-The second one is the osp2p_snscanf() call in task_upload() function.
+There are two entries through buffer overrun attack.
+
+The first one is through the strcpy() call in start_download() function.
+It is vulnerable because a malicious peer can cause t->filename to overflow with a very long filename. To protect against this, we check the length of filename by calling strlen() on it first, and it is longer than FILENAMESIZ, we simply skip the file.
+
+The second entry is through the osp2p_snscanf() call in the task_upload() function.
 A malicious peer can send a very long filename to overflow the buffer we provide.
-Since xxscanf() is inborn insecure, if we detect the filename is longer then we expect, the buffer has already been overflowed.
-In this case, we shut down the client immediately to prevent further attacks.
+Since xxscanf() is inherently insecure, so if we detect the filename is longer than expected, the buffer has already been overflown. In this case, we shut down the client immediately to prevent further attacks.
 
 # EXERCISE 2B: What other robustness problems did you fix?  (~1-3 sentences
 #    each)
 
 1. A malicious peer can send infinitely large file to us.
 Solution: We define a largest file size. 
-Everytime we write to our disk, we check the t->total_written field.
+Every time we write to our disk, we check the t->total_written field.
 If the total written size is larger than the size we define, abort this transaction, unlink the file, and try another peer.
 
 2. A slow peer can hold a file descriptor for very long time.
 Solution: We define a lowest download speed.
-Everytime we write from the task buffer, we calculate the data transfered.
-If the data transfered is lower than the threshold, we add 1 to a counter.
+Every time we write from the task buffer, we calculate the data transferred.
+If the data transferred is lower than the threshold, we add 1 to a counter.
 If the counter is larger or equal to 10, we abort the download and try another peer.
 
 3. A malicious peer can send a message to get a file outside our directory.
@@ -65,24 +64,21 @@ Solution: We simply enlarge TASKBUFSIZ from 4096 to 65536.
 # EXERCISE 3: Describe the attacks you implemented for "evil mode".  Why
 #    are they attacks?  (~3-10 sentences each)
 
-1. We send a WANT RPC call to the tracker with a popular name like "cat1.jpg" and get a list of peers from the tracker.
-When we connect to a peer, we send a GET RPC with another name, like "../osppeer.c", to steal the file from the peer.
+1. We send a WANT RPC call to the tracker with a popular name like "cat1.jpg" and get a list of peers from the tracker. When we connect to a peer, we send a GET RPC with another name, like "../osppeer.c", to steal the file from the peer.
 After stealing, we don't exit. Instead we traverse and attack all of the peers.
-This attack download files which the victims don't intend to serve.
+This attack downloads files which the victims don't intend to serve.
 
-2. We send a WANT RPC call to the tracker with a popular name like "cat1.jpg" and get a list of peers from the tracker.
-When we connect to a peer, we send a GET RPC with a very long name, like a file name with 2000 "a".
-This attack will overflow the t->filename buffer of the skeleton code, and may cause segmentation fault.
+2. We send a WANT RPC call to the tracker with a popular name like "cat1.jpg" and get a list of peers from the tracker. When we connect to a peer, we send a GET RPC with a very long name, for example a file name with 2000 a's. This attack will overflow the t->filename buffer of the skeleton code, and may cause segmentation fault.
 
-3. (Not implemented) When a peer connected to us to download a file, we can initiate a new process to constantly send junk to the peer.
+3. (Not implemented) When a peer connects to us to download a file, we can initiate a new process to constantly send junk files to the peer.
 
 # Extra credit problems
 Extra credit problem:
 
 We implement the MD5 checksum mechanism.
+
 When the download is finished, we calculate the MD5 for the local file.
-Then we send a MD5SUM RPC to the tracker and get the MD5 of that file from the tracker.
-We compare the two MD5s. If they are the same, the download is OK.
+Then we send a MD5SUM RPC to the tracker and get the MD5 of that file from the tracker. We compare the two MD5s, and if they are the same, the download is OK.
 If not, we retry the download.
 
 # Add any other information you'd like us to know below this line.
